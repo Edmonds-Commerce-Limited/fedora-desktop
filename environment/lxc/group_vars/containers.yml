@@ -1,0 +1,26 @@
+---
+# Default variables for all Incus containers
+
+# Python interpreter path - adjust based on container OS
+# Ubuntu/Debian typically use python3
+ansible_python_interpreter: /usr/bin/python3
+
+# Common packages to ensure are installed in containers
+common_packages:
+  - python3
+  - python3-apt
+  - sudo
+  - curl
+  - vim
+  - git
+
+# User configuration for containers
+# This can be overridden per container or per OS group
+default_container_user: ubuntu
+
+# SSH configuration
+ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR'
+ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_incus"
+
+# Container-specific settings
+container_timezone: "{{ lookup('env', 'TZ') | default('UTC') }}"

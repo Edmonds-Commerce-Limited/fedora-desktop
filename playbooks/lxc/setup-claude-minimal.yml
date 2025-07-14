@@ -1,0 +1,92 @@
+---
+- name: Minimal Claude Code setup for containers
+  hosts: containers
+  vars:
+    nvm_version: "0.39.1"
+    node_version: "20.12.2"
+    
+  tasks:
+    - name: Install required packages for Claude
+      package:
+        name:
+          - wget
+          - curl
+          - git
+        state: present
+
+    - name: Install EPEL repository (Fedora/RHEL)
+      package:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install DNF config manager (Fedora/RHEL)
+      package:
+        name: 'dnf-command(config-manager)'
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Add GitHub CLI repository (Fedora/RHEL)
+      shell: |
+        dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+      args:
+        creates: /etc/yum.repos.d/gh-cli.repo
+      when: ansible_os_family == "RedHat"
+
+    - name: Add GitHub CLI repository (Ubuntu/Debian)
+      block:
+        - name: Add GitHub CLI GPG key
+          shell: |
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          args:
+            creates: /usr/share/keyrings/githubcli-archive-keyring.gpg
+
+        - name: Add GitHub CLI repository
+          shell: |
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          args:
+            creates: /etc/apt/sources.list.d/github-cli.list
+
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install GitHub CLI
+      package:
+        name: gh
+        state: present
+
+    - name: Install NVM
+      shell: |
+        curl -o- https://raw.githubusercontent.com/creationix/nvm/v{{ nvm_version }}/install.sh | bash
+      args:
+        creates: "/home/{{ ansible_user }}/.nvm/nvm.sh"
+      become: false
+
+    - name: Install Node.js and Claude Code
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        nvm install {{ node_version }}
+        nvm alias default {{ node_version }}
+        npm install -g @anthropic-ai/claude-code
+      args:
+        executable: /bin/bash
+        creates: "/home/{{ ansible_user }}/.nvm/versions/node/v{{ node_version }}/bin/claude"
+      become: false
+
+    - name: Display setup instructions
+      debug:
+        msg: |
+          Claude Code is now installed on {{ inventory_hostname }}!
+          
+          To start using Claude:
+          1. SSH into the container
+          2. Navigate to your project directory
+          3. Run: claude
+          4. Copy the authentication link to your browser
+          5. Log in with your Claude account
+          
+          To configure GitHub:
+          Run: gh auth login

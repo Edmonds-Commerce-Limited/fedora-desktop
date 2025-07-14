@@ -1,0 +1,11 @@
+---
+# Fedora-specific variables
+
+ansible_user: fedora
+ansible_python_interpreter: /usr/bin/python3
+
+# Package manager module to use
+ansible_pkg_mgr: dnf
+
+# Fedora uses firewalld by default
+firewall_service: firewalld

@@ -1,0 +1,42 @@
+---
+- name: Update all Incus containers
+  hosts: running
+  strategy: free
+  tasks:
+    - name: Update package cache (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Update package cache (Fedora/RedHat)
+      dnf:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Upgrade all packages (Ubuntu/Debian)
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Upgrade all packages (Fedora/RedHat)
+      dnf:
+        name: "*"
+        state: latest
+      when: ansible_os_family == "RedHat"
+
+    - name: Check if reboot is required (Ubuntu/Debian)
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+      when: ansible_os_family == "Debian"
+
+    - name: Display reboot requirement
+      debug:
+        msg: "Reboot required for {{ inventory_hostname }}"
+      when: 
+        - ansible_os_family == "Debian"
+        - reboot_required.stat.exists is defined
+        - reboot_required.stat.exists

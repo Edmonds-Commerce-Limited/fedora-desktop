@@ -1,0 +1,192 @@
+---
+- name: Setup Claude Code and developer tools in containers
+  hosts: containers
+  vars:
+    nvm_version: "0.39.1"
+    node_version: "20.12.2"
+    developer_packages:
+      common:
+        - wget
+        - pandoc
+        - curl
+        - ripgrep
+        - fd-find
+        - bat
+        - jq
+        - xmlstarlet
+        - git
+        - htop
+        - tree
+        - ncdu
+        - unzip
+        - tar
+        - gzip
+        - bzip2
+        - nmap
+        - netcat
+        - telnet
+        - ImageMagick
+        - rsync
+        - tmux
+        - screen
+        - strace
+        - lsof
+        - vim
+        - fzf
+        - tig
+      fedora_specific:
+        - epel-release
+        - 'dnf-command(config-manager)'
+      ubuntu_specific:
+        - build-essential
+        - software-properties-common
+
+  tasks:
+    - name: Install EPEL repository (Fedora/RHEL)
+      package:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install common developer packages
+      package:
+        name: "{{ developer_packages.common }}"
+        state: present
+
+    - name: Install Fedora-specific packages
+      package:
+        name: "{{ developer_packages.fedora_specific }}"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Ubuntu-specific packages
+      package:
+        name: "{{ developer_packages.ubuntu_specific }}"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Add GitHub CLI repository (Fedora/RHEL)
+      yum_repository:
+        name: gh-cli
+        description: GitHub CLI Repository
+        baseurl: https://cli.github.com/packages/rpm
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x23F3D4EA75716059
+      when: ansible_os_family == "RedHat"
+
+    - name: Add GitHub CLI repository (Ubuntu/Debian)
+      block:
+        - name: Add GitHub CLI GPG key
+          apt_key:
+            url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+            state: present
+
+        - name: Add GitHub CLI repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://cli.github.com/packages stable main"
+            state: present
+            update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install GitHub CLI
+      package:
+        name: gh
+        state: present
+
+    - name: Check if NVM is already installed
+      stat:
+        path: "/home/{{ ansible_user }}/.nvm/nvm.sh"
+      register: nvm_installed
+      become: false
+
+    - name: Install NVM for Node.js management
+      shell: |
+        curl -o- https://raw.githubusercontent.com/creationix/nvm/v{{ nvm_version }}/install.sh | bash
+      args:
+        creates: "/home/{{ ansible_user }}/.nvm/nvm.sh"
+      become: false
+      when: not nvm_installed.stat.exists
+
+    - name: Install Node.js via NVM
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        nvm install {{ node_version }}
+        nvm alias default {{ node_version }}
+        nvm use default
+      args:
+        executable: /bin/bash
+      become: false
+      register: node_install
+      changed_when: "'is already installed' not in node_install.stdout"
+
+    - name: Install Claude Code globally
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        npm install -g @anthropic-ai/claude-code
+      args:
+        executable: /bin/bash
+        creates: "/home/{{ ansible_user }}/.nvm/versions/node/v{{ node_version }}/bin/claude"
+      become: false
+
+    - name: Configure developer-friendly shell environment
+      blockinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        marker: "# {mark} ANSIBLE MANAGED - Claude Dev Setup"
+        block: |
+
+          # Improved history
+          export HISTSIZE=10000
+          export HISTFILESIZE=20000
+          export HISTCONTROL=ignoreboth:erasedups
+          shopt -s histappend
+
+          # Bat configuration (better cat)
+          if command -v bat &> /dev/null; then
+              alias cat='bat --style=plain'
+              alias catp='bat'
+          fi
+
+          # Use ripgrep for faster searching
+          if command -v rg &> /dev/null; then
+              alias grep='rg'
+          fi
+      become: false
+
+    - name: Configure Git with sensible defaults
+      shell: |
+        git config --global init.defaultBranch main
+        git config --global pull.rebase false
+        git config --global core.editor vim
+        git config --global color.ui auto
+      become: false
+
+    - name: Display setup completion message
+      debug:
+        msg: |
+          Claude Code setup complete for {{ inventory_hostname }}!
+
+          To use Claude:
+          1. SSH into the container: ssh {{ ansible_user }}@{{ ansible_host }}
+          2. Navigate to a project directory
+          3. Run: claude
+          4. Follow the authentication link
+
+          To configure GitHub CLI:
+          1. Run: gh auth login
+          2. Follow the authentication prompts
+
+          Installed tools:
+          - Claude Code (via npm)
+          - GitHub CLI (gh)
+          - Node.js {{ node_version }} (via NVM)
+          - Developer tools: ripgrep, fd, bat, fzf, etc.
+          - Git with sensible defaults
+
+          Shell enhancements:
+          - Git aliases (gs, ga, gc, gp, gl, gd)
+          - Improved bash prompt with git branch
+          - Better history settings
+          - FZF integration for fuzzy finding
