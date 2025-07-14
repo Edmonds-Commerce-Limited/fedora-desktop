@@ -1,0 +1,271 @@
+- hosts: desktop
+  name: Incus Install Config
+  become: true
+  vars: {}
+  tasks:
+    - name: Install Incus packages from Fedora repository
+      package:
+        name:
+          - incus
+          - incus-client
+        state: present
+
+    - name: Enable and start Incus service
+      systemd:
+        name: incus
+        state: started
+        enabled: true
+
+    - name: Add user to incus-admin group for unprivileged container management
+      user:
+        name: "{{ user_login }}"
+        groups: incus-admin
+        append: true
+
+    - name: Get user UID
+      shell: "id -u {{ user_login }}"
+      register: user_uid
+      changed_when: false
+
+    - name: Get user GID
+      shell: "id -g {{ user_login }}"
+      register: user_gid
+      changed_when: false
+
+    - name: Configure subuid for unprivileged containers with identity mapping
+      blockinfile:
+        path: /etc/subuid
+        marker: "# {mark} ANSIBLE MANAGED - Incus {{ user_login }}"
+        block: |
+          # Root mapping for system containers
+          root:1000000:65536
+          # User mapping - identity map the host user
+          {{ user_login }}:{{ user_uid.stdout }}:1
+          # Additional subordinate UIDs for the user
+          {{ user_login }}:1000000:65536
+        create: true
+
+    - name: Configure subgid for unprivileged containers with identity mapping
+      blockinfile:
+        path: /etc/subgid
+        marker: "# {mark} ANSIBLE MANAGED - Incus {{ user_login }}"
+        block: |
+          # Root mapping for system containers
+          root:1000000:65536
+          # User mapping - identity map the host user
+          {{ user_login }}:{{ user_gid.stdout }}:1
+          # Additional subordinate GIDs for the user
+          {{ user_login }}:1000000:65536
+        create: true
+
+    - name: Configure kernel parameters for unprivileged containers
+      blockinfile:
+        path: /etc/sysctl.conf
+        marker: "# {mark} ANSIBLE MANAGED - Incus Install"
+        block: |
+          # Enable unprivileged user namespaces
+          kernel.unprivileged_userns_clone=1
+          # Increase inotify limits for containers
+          fs.inotify.max_user_instances=8192
+          fs.inotify.max_user_watches=524288
+          # Enable IP forwarding for container networking
+          net.ipv4.ip_forward=1
+          # Increase max number of network namespaces
+          user.max_net_namespaces=15000
+      notify: reload sysctl
+
+    - name: Initialize Incus with default settings
+      become: true
+      shell: |
+        cat <<EOF | incus admin init --preseed
+        config: {}
+        networks:
+        - config:
+            ipv4.address: auto
+            ipv4.nat: "true"
+            ipv6.address: none
+          description: ""
+          name: incusbr0
+          type: bridge
+          project: default
+        storage_pools:
+        - config:
+            source: /var/lib/incus/storage-pools/default
+          description: ""
+          name: default
+          driver: dir
+        profiles:
+        - config: {}
+          description: Default Incus profile
+          devices:
+            eth0:
+              name: eth0
+              network: incusbr0
+              type: nic
+            root:
+              path: /
+              pool: default
+              type: disk
+          name: default
+        projects: []
+        cluster: null
+        EOF
+      args:
+        creates: /var/lib/incus/database/global/db.bin
+      register: incus_init
+
+    - name: Configure firewall for Incus bridge
+      block:
+        - name: Get incusbr0 connection name
+          shell: "nmcli -t -f NAME,DEVICE con show | grep incusbr0 | cut -d: -f1"
+          register: incusbr0_con
+          changed_when: false
+          failed_when: false
+
+        - name: Switch incusbr0 to trusted firewall zone
+          command: nmcli connection modify "{{ incusbr0_con.stdout }}" connection.zone trusted
+          when: incusbr0_con.stdout != ""
+          ignore_errors: true
+
+        - name: Add incusbr0 to trusted zone in firewalld
+          firewalld:
+            zone: trusted
+            interface: incusbr0
+            permanent: true
+            state: enabled
+            immediate: true
+          ignore_errors: true
+
+    - name: Create SSH key for container access
+      become: true
+      become_user: "{{ user_login }}"
+      shell: ssh-keygen -t ed25519 -f ~/.ssh/id_incus -q -N ""
+      args:
+        creates: "/home/{{ user_login }}/.ssh/id_incus"
+
+    - name: Set up SSH config for Incus containers
+      blockinfile:
+        marker: "# {mark} Incus Containers SSH Config"
+        path: "/home/{{ user_login }}/.ssh/config"
+        create: true
+        owner: "{{ user_login }}"
+        group: "{{ user_login }}"
+        mode: '0600'
+        block: |
+          Host 10.*.*.*
+            IdentityFile ~/.ssh/id_incus
+            UserKnownHostsFile=/dev/null
+            StrictHostKeyChecking=no
+            LogLevel=ERROR
+
+    - name: Add Incus bash aliases and completion
+      blockinfile:
+        marker: "# {mark} Incus Aliases"
+        path: "/home/{{ user_login }}/.bashrc"
+        block: |
+          # Alias lxc to incus for backward compatibility
+          alias lxc='incus'
+
+          # Set up bash completion for lxc alias
+          if [ -f /usr/share/bash-completion/completions/incus ]; then
+            # Load the incus completion
+            source /usr/share/bash-completion/completions/incus
+            # Make it work with the lxc alias
+            complete -F _incus lxc
+          fi
+
+          # Function to quickly create and enter a container
+          lxcnew() {
+            if [ -z "$1" ]; then
+              echo "Usage: lxcnew <container-name> [image]"
+              return 1
+            fi
+            local name="$1"
+            local image="${2:-images:fedora/40}"
+            incus launch "$image" "$name" && incus shell "$name"
+          }
+
+          # Function to create a container with shared directories
+          lxcnew-shared() {
+            if [ -z "$1" ]; then
+              echo "Usage: lxcnew-shared <container-name> [image] [source-dir] [dest-dir]"
+              echo "Example: lxcnew-shared dev fedora/40 ~/Projects /home/ubuntu/Projects"
+              return 1
+            fi
+            local name="$1"
+            local image="${2:-images:fedora/40}"
+            local source="${3:-$HOME/Projects}"
+            local dest="${4:-/home/ubuntu/Projects}"
+
+            incus launch "$image" "$name" -p default -p shared-dirs
+            incus config device add "$name" shared disk source="$source" path="$dest"
+            echo "Container $name created with $source mounted at $dest"
+            incus shell "$name"
+          }
+
+    - name: Create development profile for containers with UID/GID mapping
+      become: true
+      shell: |
+        if ! incus profile show development >/dev/null 2>&1; then
+          cat <<EOF | incus profile create development
+        config:
+          security.nesting: "true"
+          security.syscalls.intercept.mknod: "true"
+          security.syscalls.intercept.setxattr: "true"
+          # Map host user UID/GID to container
+          raw.idmap: |
+            uid {{ user_uid.stdout }} 1000
+            gid {{ user_gid.stdout }} 1000
+        description: Development container profile with nesting support and host user mapping
+        devices: {}
+        name: development
+        EOF
+        fi
+      changed_when: false
+
+    - name: Create profile for containers with shared directories
+      become: true
+      shell: |
+        if ! incus profile show shared-dirs >/dev/null 2>&1; then
+          cat <<EOF | incus profile create shared-dirs
+        config:
+          # Map host user UID/GID to container user 1000
+          raw.idmap: |
+            uid {{ user_uid.stdout }} 1000
+            gid {{ user_gid.stdout }} 1000
+        description: Profile for containers with shared host directories
+        devices:
+          # Example shared directory - can be customized per container
+          # projects:
+          #   type: disk
+          #   source: /home/{{ user_login }}/Projects
+          #   path: /home/ubuntu/Projects
+        name: shared-dirs
+        EOF
+        fi
+      changed_when: false
+
+    - name: Display post-installation message
+      debug:
+        msg: |
+          Incus has been installed and configured for unprivileged containers.
+
+          IMPORTANT: You need to log out and log back in for group membership changes to take effect.
+
+          After logging back in, you can use 'lxc' command (aliased to incus):
+          - Create a container: lxc launch images:fedora/40 mycontainer
+          - Create with shared dirs: lxc launch images:fedora/40 mycontainer -p default -p shared-dirs
+          - List containers: lxc list
+          - Enter a container: lxc shell mycontainer
+          - Quick create functions: lxcnew, lxcnew-shared
+
+          To share directories with containers:
+          1. Use the 'shared-dirs' profile when creating containers
+          2. Add disk devices to share specific directories:
+             lxc config device add mycontainer projects disk source=/home/{{ user_login }}/Projects path=/home/ubuntu/Projects
+
+          The UID/GID mapping is configured so files created in containers will have the correct ownership.
+
+  handlers:
+    - name: reload sysctl
+      command: sysctl -p
